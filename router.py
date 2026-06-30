@@ -18,6 +18,7 @@ import os
 import random
 import re
 import sys
+import tempfile
 import time
 from dataclasses import dataclass, field
 from typing import Iterable, Iterator, Literal
@@ -103,16 +104,6 @@ MODELS: list[ModelProfile] = [
         notes="Fast and low-cost Qwen model.",
     ),
     ModelProfile(
-        name="qwen_plus",
-        family="qwen",
-        model="qwen/qwen-plus",
-        cost_score=1.7,
-        quality_score=7.9,
-        strengths={"simple", "translation", "creative", "long_context", "coding"},
-        max_context_tokens=1_000_000,
-        notes="Balanced Qwen route.",
-    ),
-    ModelProfile(
         name="qwen_max_preview",
         family="qwen",
         model="qwen/qwen3.6-max-preview",
@@ -136,29 +127,8 @@ MODELS: list[ModelProfile] = [
         notes="Strong coding/agent model from Moonshot Kimi family.",
         reasoning=True,
     ),
-    ModelProfile(
-        name="kimi_k2",
-        family="kimi",
-        model="moonshotai/kimi-k2-0905",
-        cost_score=2.3,
-        quality_score=8.2,
-        strengths={"creative", "coding", "reasoning"},
-        max_context_tokens=262_000,
-        notes="General Kimi fallback.",
-    ),
 
     # GLM / Z.ai
-    ModelProfile(
-        name="glm_air",
-        family="glm",
-        model="z-ai/glm-4.5-air",
-        cost_score=1.6,
-        quality_score=7.8,
-        strengths={"simple", "coding", "reasoning"},
-        max_context_tokens=131_000,
-        notes="Cheap GLM fallback.",
-        reasoning=True,
-    ),
     ModelProfile(
         name="glm_5_2",
         family="glm",
@@ -172,17 +142,6 @@ MODELS: list[ModelProfile] = [
     ),
 
     # MiniMax
-    ModelProfile(
-        name="minimax_m2",
-        family="minimax",
-        model="minimax/minimax-m2",
-        cost_score=1.9,
-        quality_score=8.0,
-        strengths={"coding", "reasoning", "simple"},
-        max_context_tokens=196_000,
-        notes="Cheaper MiniMax route, good for coding/agentic tasks.",
-        reasoning=True,
-    ),
     ModelProfile(
         name="minimax_m3",
         family="minimax",
@@ -250,11 +209,83 @@ class EasyChineseModelRouter:
         mode: Mode = "auto",
         max_retries_per_model: int = 3,
         allow_families: set[str] | None = None,
+        sticky_ttl: float = 300.0,
+        sticky_store: str | None = None,
     ) -> None:
         self.models = list(models)
         self.mode = mode
         self.max_retries_per_model = max_retries_per_model
         self.allow_families = {f.lower() for f in allow_families} if allow_families else None
+
+        # Session stickiness: once a session routes to a model, reuse it for
+        # follow-up turns so the provider prompt cache stays warm and the
+        # assistant's voice/quality stays consistent. Mirrors OpenRouter's
+        # ~5-minute session pinning. Maps session_id -> (model_name, expires_at).
+        #
+        # In-memory by default (great for a long-lived router object). The CLI
+        # runs a fresh process per turn, so it passes ``sticky_store`` to persist
+        # the mapping to a small JSON file keyed by session_id.
+        self.sticky_ttl = sticky_ttl
+        self.sticky_store = sticky_store
+        self._sticky_choices: dict[str, tuple[str, float]] = self._load_sticky()
+
+    def _load_sticky(self) -> dict[str, tuple[str, float]]:
+        if not self.sticky_store or not os.path.exists(self.sticky_store):
+            return {}
+        try:
+            with open(self.sticky_store, "r", encoding="utf-8") as fh:
+                raw = json.load(fh)
+            now = time.time()
+            return {
+                sid: (entry[0], float(entry[1]))
+                for sid, entry in raw.items()
+                if float(entry[1]) > now  # drop already-expired sessions on load
+            }
+        except (OSError, ValueError, TypeError, KeyError, IndexError):
+            return {}  # corrupt/old store: start clean rather than crash
+
+    def _save_sticky(self) -> None:
+        if not self.sticky_store:
+            return
+        try:
+            with open(self.sticky_store, "w", encoding="utf-8") as fh:
+                json.dump(self._sticky_choices, fh)
+        except OSError:
+            pass  # persistence is best-effort; never fail a chat over it
+
+    def _apply_sticky(
+        self, session_id: str | None, route: list[ModelProfile]
+    ) -> list[ModelProfile]:
+        """Move a session's remembered model to the front of the route.
+
+        The pinned model is only honored if it is still a valid candidate for
+        this request (i.e. still in ``route`` after context/family filtering),
+        so a grown context window or a family restriction transparently
+        re-routes instead of forcing an unusable model.
+        """
+        if not session_id:
+            return route
+
+        entry = self._sticky_choices.get(session_id)
+        if not entry:
+            return route
+
+        name, expires_at = entry
+        if time.time() > expires_at:
+            self._sticky_choices.pop(session_id, None)
+            self._save_sticky()
+            return route
+
+        pinned = next((m for m in route if m.name == name), None)
+        if pinned is None:
+            return route
+
+        return [pinned, *(m for m in route if m.name != name)]
+
+    def _remember_sticky(self, session_id: str | None, model_name: str) -> None:
+        if session_id:
+            self._sticky_choices[session_id] = (model_name, time.time() + self.sticky_ttl)
+            self._save_sticky()
 
     @staticmethod
     def estimate_tokens(text: str) -> int:
@@ -391,6 +422,7 @@ class EasyChineseModelRouter:
         dry_run: bool = False,
         stream: bool = False,
         history: list[dict] | None = None,
+        session_id: str | None = None,
     ) -> "dict | StreamResult":
         api_key = os.getenv("OPENROUTER_API_KEY")
         if not api_key:
@@ -413,10 +445,14 @@ class EasyChineseModelRouter:
             allowed = ", ".join(sorted(self.allow_families or [])) or "all"
             raise RuntimeError(f"No model fits this request. Allowed families: {allowed}")
 
+        route = self._apply_sticky(session_id, route)
+
         if dry_run:
             return {
                 "task": task,
                 "mode": self.mode,
+                "session_id": session_id,
+                "sticky": bool(session_id) and session_id in self._sticky_choices,
                 "selected": route[0].name,
                 "selected_family": route[0].family,
                 "selected_model": route[0].model,
@@ -432,6 +468,7 @@ class EasyChineseModelRouter:
                     temperature=temperature,
                     max_tokens=max_tokens,
                     task=task,
+                    session_id=session_id,
                 )
             )
 
@@ -440,7 +477,7 @@ class EasyChineseModelRouter:
         for model in route:
             for attempt in range(1, self.max_retries_per_model + 1):
                 try:
-                    return self._call_openrouter(
+                    result = self._call_openrouter(
                         api_key=api_key,
                         model=model,
                         messages=messages,
@@ -448,6 +485,8 @@ class EasyChineseModelRouter:
                         max_tokens=max_tokens,
                         task=task,
                     )
+                    self._remember_sticky(session_id, model.name)
+                    return result
                 except Exception as exc:
                     errors.append(
                         f"{model.model} attempt {attempt}: {type(exc).__name__}: {exc}"
@@ -582,6 +621,7 @@ class EasyChineseModelRouter:
         temperature: float,
         max_tokens: int,
         task: TaskKind,
+        session_id: str | None = None,
     ):
         errors: list[str] = []
 
@@ -601,6 +641,7 @@ class EasyChineseModelRouter:
                         try:
                             chunk = next(gen)
                         except StopIteration as stop:
+                            self._remember_sticky(session_id, model.name)
                             return stop.value or {}
                         content_started = True
                         yield chunk
@@ -754,6 +795,13 @@ def main() -> int:
         "--history",
         help="Path to a JSON file with prior messages [{'role','content'}, ...]",
     )
+    parser.add_argument(
+        "--session-id",
+        help=(
+            "Pin a session to its first-chosen model so follow-up turns reuse it "
+            "(keeps the provider prompt cache warm). Persisted across CLI runs."
+        ),
+    )
 
     args = parser.parse_args()
 
@@ -781,9 +829,18 @@ def main() -> int:
         )
         return 2
 
+    # Persist session->model pins to a temp file so stickiness survives across
+    # separate CLI invocations (each run is a fresh process).
+    sticky_store = (
+        os.path.join(tempfile.gettempdir(), "echinese_router_sessions.json")
+        if args.session_id
+        else None
+    )
+
     router = EasyChineseModelRouter(
         mode=args.mode,
         allow_families=set(args.family) if args.family else None,
+        sticky_store=sticky_store,
     )
 
     history: list[dict] | None = None
@@ -806,6 +863,7 @@ def main() -> int:
                 max_tokens=args.max_tokens,
                 stream=True,
                 history=history,
+                session_id=args.session_id,
             )
             for chunk in stream_result:
                 print(chunk, end="", flush=True)
@@ -823,6 +881,7 @@ def main() -> int:
             max_tokens=args.max_tokens,
             dry_run=args.dry_run,
             history=history,
+            session_id=args.session_id,
         )
     except Exception as exc:
         print(f"Router failed: {exc}", file=sys.stderr)
