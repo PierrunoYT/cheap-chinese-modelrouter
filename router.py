@@ -1,0 +1,844 @@
+"""
+Easy Chinese Model Router
+
+One-key setup router for MiniMax, MiMo, Qwen, Kimi, GLM and DeepSeek via OpenRouter.
+
+Quick start:
+  1) Create .env with OPENROUTER_API_KEY=sk-or-...
+  2) pip install openai python-dotenv
+  3) python router.py --prompt "fix this Python bug" --dry-run
+  4) python router.py --prompt "write a FastAPI endpoint"
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import random
+import re
+import sys
+import time
+from dataclasses import dataclass, field
+from typing import Iterable, Iterator, Literal
+
+try:
+    from dotenv import load_dotenv
+except ImportError:
+    def load_dotenv(*args, **kwargs):
+        return False
+
+load_dotenv()
+
+TaskKind = Literal[
+    "simple",
+    "coding",
+    "reasoning",
+    "long_context",
+    "translation",
+    "creative",
+]
+
+Mode = Literal["auto", "cheap", "balanced", "quality"]
+
+OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+DEFAULT_SYSTEM = "You are a helpful, accurate assistant. Be concise unless detail is needed."
+
+
+@dataclass(frozen=True)
+class ModelProfile:
+    name: str
+    family: str
+    model: str
+    cost_score: float          # lower = cheaper
+    quality_score: float       # higher = better
+    strengths: set[TaskKind] = field(default_factory=set)
+    max_context_tokens: int = 128_000
+    notes: str = ""
+    supports_tools: bool = True
+    reasoning: bool = False
+
+
+# Model slugs may change on OpenRouter, so keep these editable.
+#   Use: python router.py --list-models     to print this table
+#   Use: python router.py --validate-models  to check slugs against the live catalog
+#
+# NOTE: cost_score and quality_score are SUBJECTIVE HEURISTICS for relative
+# ordering only -- they are not derived from OpenRouter pricing or published
+# benchmarks. Tune them to taste; they affect routing order, not billing.
+MODELS: list[ModelProfile] = [
+    # DeepSeek
+    ModelProfile(
+        name="deepseek_flash",
+        family="deepseek",
+        model="deepseek/deepseek-v4-flash",
+        cost_score=1.0,
+        quality_score=7.6,
+        strengths={"simple", "coding", "long_context", "translation"},
+        max_context_tokens=1_000_000,
+        notes="Cheap default. Good for simple/coding/long-context first pass.",
+        reasoning=True,
+    ),
+    ModelProfile(
+        name="deepseek_pro",
+        family="deepseek",
+        model="deepseek/deepseek-v4-pro",
+        cost_score=2.2,
+        quality_score=8.5,
+        strengths={"reasoning", "coding", "long_context"},
+        max_context_tokens=1_000_000,
+        notes="Stronger DeepSeek option for reasoning and larger coding tasks.",
+        reasoning=True,
+    ),
+
+    # Qwen
+    ModelProfile(
+        name="qwen_flash",
+        family="qwen",
+        model="qwen/qwen3.6-flash",
+        cost_score=1.4,
+        quality_score=7.7,
+        strengths={"simple", "translation", "creative", "long_context"},
+        max_context_tokens=1_000_000,
+        notes="Fast and low-cost Qwen model.",
+    ),
+    ModelProfile(
+        name="qwen_plus",
+        family="qwen",
+        model="qwen/qwen-plus",
+        cost_score=1.7,
+        quality_score=7.9,
+        strengths={"simple", "translation", "creative", "long_context", "coding"},
+        max_context_tokens=1_000_000,
+        notes="Balanced Qwen route.",
+    ),
+    ModelProfile(
+        name="qwen_max_preview",
+        family="qwen",
+        model="qwen/qwen3.6-max-preview",
+        cost_score=3.3,
+        quality_score=8.6,
+        strengths={"coding", "reasoning", "creative"},
+        max_context_tokens=262_000,
+        notes="Higher-quality Qwen option for coding and reasoning.",
+        reasoning=True,
+    ),
+
+    # Kimi / Moonshot
+    ModelProfile(
+        name="kimi_code",
+        family="kimi",
+        model="moonshotai/kimi-k2.7-code",
+        cost_score=2.7,
+        quality_score=8.7,
+        strengths={"coding", "reasoning", "long_context"},
+        max_context_tokens=262_000,
+        notes="Strong coding/agent model from Moonshot Kimi family.",
+        reasoning=True,
+    ),
+    ModelProfile(
+        name="kimi_k2",
+        family="kimi",
+        model="moonshotai/kimi-k2-0905",
+        cost_score=2.3,
+        quality_score=8.2,
+        strengths={"creative", "coding", "reasoning"},
+        max_context_tokens=262_000,
+        notes="General Kimi fallback.",
+    ),
+
+    # GLM / Z.ai
+    ModelProfile(
+        name="glm_air",
+        family="glm",
+        model="z-ai/glm-4.5-air",
+        cost_score=1.6,
+        quality_score=7.8,
+        strengths={"simple", "coding", "reasoning"},
+        max_context_tokens=131_000,
+        notes="Cheap GLM fallback.",
+        reasoning=True,
+    ),
+    ModelProfile(
+        name="glm_5_2",
+        family="glm",
+        model="z-ai/glm-5.2",
+        cost_score=2.5,
+        quality_score=8.9,
+        strengths={"reasoning", "coding", "long_context"},
+        max_context_tokens=1_000_000,
+        notes="High-quality GLM route for reasoning, coding and long tasks.",
+        reasoning=True,
+    ),
+
+    # MiniMax
+    ModelProfile(
+        name="minimax_m2",
+        family="minimax",
+        model="minimax/minimax-m2",
+        cost_score=1.9,
+        quality_score=8.0,
+        strengths={"coding", "reasoning", "simple"},
+        max_context_tokens=196_000,
+        notes="Cheaper MiniMax route, good for coding/agentic tasks.",
+        reasoning=True,
+    ),
+    ModelProfile(
+        name="minimax_m3",
+        family="minimax",
+        model="minimax/minimax-m3",
+        cost_score=2.1,
+        quality_score=8.4,
+        strengths={"coding", "reasoning", "long_context", "creative"},
+        max_context_tokens=524_000,
+        notes="More capable MiniMax route with long-context support.",
+    ),
+
+    # Xiaomi MiMo
+    ModelProfile(
+        name="mimo_2_5",
+        family="mimo",
+        model="xiaomi/mimo-v2.5",
+        cost_score=1.2,
+        quality_score=8.2,
+        strengths={"coding", "reasoning", "long_context", "simple"},
+        max_context_tokens=1_000_000,
+        notes="Low-cost MiMo route, good for agentic and long-context work.",
+        reasoning=True,
+    ),
+    ModelProfile(
+        name="mimo_2_5_pro",
+        family="mimo",
+        model="xiaomi/mimo-v2.5-pro",
+        cost_score=2.4,
+        quality_score=9.0,
+        strengths={"coding", "reasoning", "long_context"},
+        max_context_tokens=1_000_000,
+        notes="Flagship MiMo route for harder coding/agent tasks.",
+        reasoning=True,
+    ),
+]
+
+
+class StreamResult:
+    """Iterator over streamed content chunks.
+
+    Yields content strings. After iteration completes, ``meta`` holds the
+    final metadata dict (family, model, finish_reason, usage, full content).
+    """
+
+    def __init__(self, chunks: "Iterator[str]") -> None:
+        self._chunks = chunks
+        self.meta: dict = {}
+
+    def __iter__(self) -> "StreamResult":
+        return self
+
+    def __next__(self) -> str:
+        try:
+            return next(self._chunks)
+        except StopIteration as stop:
+            self.meta = stop.value or {}
+            raise
+
+
+class EasyChineseModelRouter:
+    def __init__(
+        self,
+        models: Iterable[ModelProfile] = MODELS,
+        *,
+        mode: Mode = "auto",
+        max_retries_per_model: int = 3,
+        allow_families: set[str] | None = None,
+    ) -> None:
+        self.models = list(models)
+        self.mode = mode
+        self.max_retries_per_model = max_retries_per_model
+        self.allow_families = {f.lower() for f in allow_families} if allow_families else None
+
+    @staticmethod
+    def estimate_tokens(text: str) -> int:
+        # Heuristic token estimate, CJK-aware.
+        # Sources: OpenAI tokenizer docs (~4 chars/token for English),
+        # presenc.ai 2026 research (~1.4-1.8 tokens/CJK char on GPT-style tokenizers),
+        # tianpan.co guidance (use 2 tokens/CJK char for safe budgeting).
+        # We use the conservative 2.0 multiplier because this estimate guards
+        # context-window overflow, where undercounting is worse than overcounting.
+        if not text:
+            return 1
+
+        cjk_chars = 0
+        other_chars = 0
+
+        for ch in text:
+            code = ord(ch)
+            if (
+                0x4E00 <= code <= 0x9FFF        # CJK Unified Ideographs
+                or 0x3400 <= code <= 0x4DBF     # CJK Extension A
+                or 0x20000 <= code <= 0x2A6DF   # CJK Extension B
+                or 0x3040 <= code <= 0x30FF     # Hiragana + Katakana
+                or 0xAC00 <= code <= 0xD7AF     # Hangul Syllables
+                or 0xFF00 <= code <= 0xFFEF     # Fullwidth forms
+            ):
+                cjk_chars += 1
+            elif not ch.isspace():
+                other_chars += 1
+
+        return max(1, cjk_chars * 2 + other_chars // 4)
+
+    def classify(self, prompt: str, messages: list[dict] | None = None) -> TaskKind:
+        text = prompt.lower()
+        token_estimate = self.estimate_tokens(
+            prompt if messages is None else json.dumps(messages)
+        )
+
+        if token_estimate > 70_000:
+            return "long_context"
+
+        # Strong code signals (fenced code, language syntax) win outright.
+        if any(re.search(pattern, text) for pattern in [
+            r"```|\bdef \b|\bclass \b|\bfunction \b|\bconst \b|\blet \b|\bimport \b",
+            r"\b(stack trace|traceback|stacktrace|segfault|compile error|syntax error)\b",
+        ]):
+            return "coding"
+
+        # Explicit creative-writing intent is checked before generic coding
+        # keywords so "write a story about bugs" is not misread as coding.
+        if any(re.search(pattern, text) for pattern in [
+            r"\bwrite (me )?a (short )?(story|poem|song|script|essay|tagline|slogan|headline)\b",
+            r"\bwrite a prompt\b",
+            r"\bmake it sound\b",
+            r"\b(brainstorm|come up with) (some )?(ideas|names|titles)\b",
+        ]):
+            return "creative"
+
+        # Translation / language editing.
+        if any(re.search(pattern, text) for pattern in [
+            r"\btranslate\b",
+            r"\bfix (the )?grammar\b",
+            r"\brewrite (this )?in\b",
+            r"\binto (chinese|english|japanese|korean|spanish|french|german)\b",
+        ]):
+            return "translation"
+
+        # Generic coding keywords (weaker than the strong signals above).
+        if any(re.search(pattern, text) for pattern in [
+            r"\b(code|coding|debug|refactor|bug fix|stack overflow|repo|git|pull request|commit|diff|patch)\b",
+            r"\b(python|typescript|javascript|node|react|fastapi|powershell|bash|sql|docker|kubernetes)\b",
+        ]):
+            return "coding"
+
+        if any(re.search(pattern, text) for pattern in [
+            r"\b(reason|think|analyze|architecture|compare|tradeoff|prove|math|optimize|evaluate)\b",
+            r"\b(why|which is better|best approach|design|plan)\b",
+        ]):
+            return "reasoning"
+
+        return "simple"
+
+    def route(self, prompt: str, messages: list[dict] | None = None) -> list[ModelProfile]:
+        task = self.classify(prompt, messages)
+        estimated_tokens = self.estimate_tokens(
+            prompt if messages is None else json.dumps(messages)
+        )
+
+        candidates = [
+            model
+            for model in self.models
+            if estimated_tokens <= int(model.max_context_tokens * 0.85)
+            and (self.allow_families is None or model.family.lower() in self.allow_families)
+        ]
+
+        if not candidates:
+            return []
+
+        def score(model: ModelProfile) -> tuple[float, float, str]:
+            task_bonus = -1.0 if task in model.strengths else 1.5
+
+            if self.mode == "cheap":
+                return (model.cost_score + task_bonus, -model.quality_score, model.name)
+
+            if self.mode == "quality":
+                return (-model.quality_score + task_bonus, model.cost_score, model.name)
+
+            if self.mode == "balanced":
+                return (
+                    model.cost_score * 0.55 - model.quality_score * 0.45 + task_bonus,
+                    model.cost_score,
+                    model.name,
+                )
+
+            # auto mode:
+            # Cheap for simple tasks, stronger for coding/reasoning/long context.
+            if task in {"simple", "translation", "creative"}:
+                return (model.cost_score + task_bonus, -model.quality_score, model.name)
+
+            return (
+                model.cost_score * 0.4 - model.quality_score * 0.6 + task_bonus,
+                model.cost_score,
+                model.name,
+            )
+
+        return sorted(candidates, key=score)
+
+    def chat(
+        self,
+        prompt: str,
+        *,
+        system: str = DEFAULT_SYSTEM,
+        temperature: float = 0.2,
+        max_tokens: int = 2048,
+        dry_run: bool = False,
+        stream: bool = False,
+        history: list[dict] | None = None,
+    ) -> "dict | StreamResult":
+        api_key = os.getenv("OPENROUTER_API_KEY")
+        if not api_key:
+            raise RuntimeError(
+                "OPENROUTER_API_KEY is missing. Create a .env file and paste your key."
+            )
+
+        # Build the message list: system prompt, prior turns, then this prompt.
+        messages: list[dict] = [{"role": "system", "content": system}]
+        if history:
+            messages.extend(
+                msg for msg in history if msg.get("role") != "system"
+            )
+        messages.append({"role": "user", "content": prompt})
+
+        task = self.classify(prompt, messages)
+        route = self.route(prompt, messages)
+
+        if not route:
+            allowed = ", ".join(sorted(self.allow_families or [])) or "all"
+            raise RuntimeError(f"No model fits this request. Allowed families: {allowed}")
+
+        if dry_run:
+            return {
+                "task": task,
+                "mode": self.mode,
+                "selected": route[0].name,
+                "selected_family": route[0].family,
+                "selected_model": route[0].model,
+                "fallback_order": [m.model for m in route],
+            }
+
+        if stream:
+            return StreamResult(
+                self._stream_chat(
+                    api_key=api_key,
+                    route=route,
+                    messages=messages,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    task=task,
+                )
+            )
+
+        errors: list[str] = []
+
+        for model in route:
+            for attempt in range(1, self.max_retries_per_model + 1):
+                try:
+                    return self._call_openrouter(
+                        api_key=api_key,
+                        model=model,
+                        messages=messages,
+                        temperature=temperature,
+                        max_tokens=max_tokens,
+                        task=task,
+                    )
+                except Exception as exc:
+                    errors.append(
+                        f"{model.model} attempt {attempt}: {type(exc).__name__}: {exc}"
+                    )
+
+                    # Bad key/auth will fail for every model, so stop early.
+                    if self._is_auth_error(exc):
+                        raise RuntimeError(errors[-1]) from exc
+
+                    # Non-retryable (e.g. 400 bad request) -> try the next model
+                    # immediately rather than retrying the same one.
+                    if not self._is_retryable(exc):
+                        break
+
+                    self._sleep_backoff(attempt, exc)
+
+        raise RuntimeError("All routed models failed:\n" + "\n".join(errors[-12:]))
+
+    @staticmethod
+    def _build_headers() -> dict[str, str]:
+        headers: dict[str, str] = {}
+        if os.getenv("OPENROUTER_REFERER"):
+            headers["HTTP-Referer"] = os.getenv("OPENROUTER_REFERER", "")
+        if os.getenv("OPENROUTER_APP_NAME"):
+            headers["X-OpenRouter-Title"] = os.getenv("OPENROUTER_APP_NAME", "")
+        return headers
+
+    def _build_client(self, api_key: str):
+        try:
+            from openai import OpenAI
+        except ImportError as exc:
+            raise RuntimeError("Missing dependency. Run: pip install openai python-dotenv") from exc
+
+        return OpenAI(
+            api_key=api_key,
+            base_url=OPENROUTER_BASE_URL,
+            default_headers=self._build_headers() or None,
+            timeout=90.0,
+        )
+
+    @staticmethod
+    def _reasoning_body(model: ModelProfile, task: TaskKind) -> dict:
+        # Only ask for reasoning where it helps.
+        if model.reasoning and task in {"coding", "reasoning", "long_context"}:
+            return {"reasoning": {"enabled": True}}
+        return {}
+
+    @staticmethod
+    def _is_auth_error(exc: Exception) -> bool:
+        return type(exc).__name__ in {"AuthenticationError", "PermissionDeniedError"} or (
+            getattr(exc, "status_code", None) in {401, 403}
+        )
+
+    @staticmethod
+    def _is_bad_request(exc: Exception) -> bool:
+        return type(exc).__name__ == "BadRequestError" or getattr(exc, "status_code", None) == 400
+
+    @staticmethod
+    def _is_retryable(exc: Exception) -> bool:
+        if getattr(exc, "status_code", None) in {408, 409, 429, 500, 502, 503, 504}:
+            return True
+        return type(exc).__name__ in {
+            "RateLimitError",
+            "InternalServerError",
+            "APITimeoutError",
+            "APIConnectionError",
+        }
+
+    def _create(self, client, *, model, messages, temperature, max_tokens, extra_body, **kwargs):
+        """Create a completion, retrying once without extra_body if a provider
+        rejects an unknown field (e.g. the `reasoning` flag) with a 400."""
+        try:
+            return client.chat.completions.create(
+                model=model.model,
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                extra_body=extra_body or None,
+                **kwargs,
+            )
+        except Exception as exc:
+            if extra_body and self._is_bad_request(exc):
+                return client.chat.completions.create(
+                    model=model.model,
+                    messages=messages,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    extra_body=None,
+                    **kwargs,
+                )
+            raise
+
+    def _call_openrouter(
+        self,
+        *,
+        api_key: str,
+        model: ModelProfile,
+        messages: list[dict],
+        temperature: float,
+        max_tokens: int,
+        task: TaskKind,
+    ) -> dict:
+        client = self._build_client(api_key)
+        extra_body = self._reasoning_body(model, task)
+
+        response = self._create(
+            client,
+            model=model,
+            messages=messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            extra_body=extra_body,
+        )
+
+        choice = response.choices[0]
+
+        return {
+            "family": model.family,
+            "model_name": model.name,
+            "model": model.model,
+            "content": choice.message.content or "",
+            "finish_reason": choice.finish_reason,
+            "usage": response.usage.model_dump() if response.usage else None,
+        }
+
+    def _stream_chat(
+        self,
+        *,
+        api_key: str,
+        route: list[ModelProfile],
+        messages: list[dict],
+        temperature: float,
+        max_tokens: int,
+        task: TaskKind,
+    ):
+        errors: list[str] = []
+
+        for model in route:
+            for attempt in range(1, self.max_retries_per_model + 1):
+                content_started = False
+                try:
+                    gen = self._call_openrouter_stream(
+                        api_key=api_key,
+                        model=model,
+                        messages=messages,
+                        temperature=temperature,
+                        max_tokens=max_tokens,
+                        task=task,
+                    )
+                    while True:
+                        try:
+                            chunk = next(gen)
+                        except StopIteration as stop:
+                            return stop.value or {}
+                        content_started = True
+                        yield chunk
+                except Exception as exc:
+                    if content_started:
+                        raise RuntimeError(
+                            f"Stream interrupted: {type(exc).__name__}: {exc}"
+                        ) from exc
+                    errors.append(
+                        f"{model.model} attempt {attempt}: {type(exc).__name__}: {exc}"
+                    )
+                    if self._is_auth_error(exc):
+                        raise RuntimeError(errors[-1]) from exc
+                    if not self._is_retryable(exc):
+                        break
+                    self._sleep_backoff(attempt, exc)
+
+        raise RuntimeError("All routed models failed:\n" + "\n".join(errors[-12:]))
+
+    def _call_openrouter_stream(
+        self,
+        *,
+        api_key: str,
+        model: ModelProfile,
+        messages: list[dict],
+        temperature: float,
+        max_tokens: int,
+        task: TaskKind,
+    ):
+        client = self._build_client(api_key)
+        extra_body = self._reasoning_body(model, task)
+
+        response = self._create(
+            client,
+            model=model,
+            messages=messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            extra_body=extra_body,
+            stream=True,
+            stream_options={"include_usage": True},
+        )
+
+        content_parts: list[str] = []
+        finish_reason: str | None = None
+        usage: dict | None = None
+
+        for event in response:
+            if event.usage:
+                usage = event.usage.model_dump()
+            if not event.choices:
+                continue
+            delta = event.choices[0]
+            if delta.finish_reason:
+                finish_reason = delta.finish_reason
+            if delta.delta and delta.delta.content:
+                content_parts.append(delta.delta.content)
+                yield delta.delta.content
+
+        return {
+            "family": model.family,
+            "model_name": model.name,
+            "model": model.model,
+            "content": "".join(content_parts),
+            "finish_reason": finish_reason,
+            "usage": usage,
+        }
+
+    @staticmethod
+    def _sleep_backoff(attempt: int, exc: Exception | None = None) -> None:
+        delay: float | None = None
+
+        # Honor a Retry-After header when the provider sends one (common on 429).
+        resp = getattr(exc, "response", None)
+        if resp is not None:
+            try:
+                retry_after = resp.headers.get("retry-after")
+                if retry_after:
+                    delay = float(retry_after)
+            except (AttributeError, ValueError, TypeError):
+                delay = None
+
+        if delay is None:
+            delay = (2 ** (attempt - 1)) + random.random()
+
+        time.sleep(min(30.0, delay))
+
+    def validate_models(self, api_key: str) -> dict:
+        """Check configured model slugs against OpenRouter's live catalog.
+
+        Model slugs drift over time; this flags any that no longer exist so the
+        MODELS table can be updated.
+        """
+        client = self._build_client(api_key)
+        available = {m.id for m in client.models.list().data}
+        configured = {m.model for m in self.models}
+        missing = sorted(configured - available)
+        return {
+            "available_count": len(available),
+            "configured_count": len(configured),
+            "missing": missing,
+            "ok": not missing,
+        }
+
+
+def print_known_models() -> None:
+    rows = [
+        {
+            "name": m.name,
+            "family": m.family,
+            "model": m.model,
+            "cost_score": m.cost_score,
+            "quality_score": m.quality_score,
+            "context": m.max_context_tokens,
+            "strengths": sorted(m.strengths),
+        }
+        for m in MODELS
+    ]
+
+    print(json.dumps(rows, indent=2))
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description="One-key router for cheap Chinese LLMs via OpenRouter"
+    )
+
+    parser.add_argument("--prompt", help="Prompt to send")
+    parser.add_argument("--system", default=DEFAULT_SYSTEM)
+    parser.add_argument(
+        "--mode",
+        choices=["auto", "cheap", "balanced", "quality"],
+        default="auto",
+    )
+    parser.add_argument(
+        "--family",
+        action="append",
+        help="Restrict to a family: deepseek, qwen, kimi, glm, minimax, mimo. Can be repeated.",
+    )
+    parser.add_argument("--max-tokens", type=int, default=2048)
+    parser.add_argument("--temperature", type=float, default=0.2)
+    parser.add_argument("--dry-run", action="store_true", help="Only show routing decision")
+    parser.add_argument("--list-models", action="store_true", help="Print the built-in model table")
+    parser.add_argument("--stream", action="store_true", help="Stream output as it arrives")
+    parser.add_argument(
+        "--validate-models",
+        action="store_true",
+        help="Check configured model slugs against OpenRouter's live catalog",
+    )
+    parser.add_argument(
+        "--history",
+        help="Path to a JSON file with prior messages [{'role','content'}, ...]",
+    )
+
+    args = parser.parse_args()
+
+    if args.list_models:
+        print_known_models()
+        return 0
+
+    if args.validate_models:
+        api_key = os.getenv("OPENROUTER_API_KEY")
+        if not api_key:
+            print("OPENROUTER_API_KEY is missing.", file=sys.stderr)
+            return 1
+        try:
+            report = EasyChineseModelRouter().validate_models(api_key)
+        except Exception as exc:
+            print(f"Validation failed: {exc}", file=sys.stderr)
+            return 1
+        print(json.dumps(report, indent=2))
+        return 0 if report["ok"] else 1
+
+    if not args.prompt:
+        print(
+            'Missing --prompt. Example: python router.py --prompt "fix this Python bug"',
+            file=sys.stderr,
+        )
+        return 2
+
+    router = EasyChineseModelRouter(
+        mode=args.mode,
+        allow_families=set(args.family) if args.family else None,
+    )
+
+    history: list[dict] | None = None
+    if args.history:
+        try:
+            with open(args.history, "r", encoding="utf-8") as fh:
+                history = json.load(fh)
+            if not isinstance(history, list):
+                raise ValueError("history file must contain a JSON list of messages")
+        except Exception as exc:
+            print(f"Failed to load history: {exc}", file=sys.stderr)
+            return 1
+
+    try:
+        if args.stream and not args.dry_run:
+            stream_result = router.chat(
+                args.prompt,
+                system=args.system,
+                temperature=args.temperature,
+                max_tokens=args.max_tokens,
+                stream=True,
+                history=history,
+            )
+            for chunk in stream_result:
+                print(chunk, end="", flush=True)
+            meta = stream_result.meta
+            print(
+                f"\n---\nfamily={meta['family']} model={meta['model']} usage={meta['usage']}",
+                file=sys.stderr,
+            )
+            return 0
+
+        result = router.chat(
+            args.prompt,
+            system=args.system,
+            temperature=args.temperature,
+            max_tokens=args.max_tokens,
+            dry_run=args.dry_run,
+            history=history,
+        )
+    except Exception as exc:
+        print(f"Router failed: {exc}", file=sys.stderr)
+        return 1
+
+    if args.dry_run:
+        print(json.dumps(result, indent=2))
+    else:
+        print(result["content"])
+        print(
+            f"\n---\nfamily={result['family']} model={result['model']} usage={result['usage']}",
+            file=sys.stderr,
+        )
+
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
