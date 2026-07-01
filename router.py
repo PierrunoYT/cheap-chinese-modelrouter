@@ -121,6 +121,7 @@ MODELS: list[ModelProfile] = [
         strengths={"simple", "translation", "creative", "long_context"},
         max_context_tokens=1_000_000,
         notes="Fast and low-cost Qwen model.",
+        reasoning=True,
     ),
     ModelProfile(
         name="qwen_max",
@@ -170,6 +171,7 @@ MODELS: list[ModelProfile] = [
         strengths={"coding", "reasoning", "long_context", "creative"},
         max_context_tokens=524_000,
         notes="More capable MiniMax route with long-context support.",
+        reasoning=True,
     ),
 
     # Xiaomi MiMo
@@ -373,7 +375,7 @@ class EasyChineseModelRouter:
             raise RuntimeError("OPENROUTER_API_KEY missing for LLM classifier")
 
         client = self._build_client(api_key)
-        response = client.chat.completions.create(
+        kwargs = dict(
             model=self.classifier_model,
             messages=[
                 {"role": "system", "content": CLASSIFIER_INSTRUCTION},
@@ -382,9 +384,20 @@ class EasyChineseModelRouter:
                 {"role": "user", "content": prompt[:2000]},
             ],
             temperature=0.0,
-            max_tokens=10,
+            max_tokens=32,
             timeout=10.0,
         )
+        try:
+            # Reasoning models burn the whole token budget on hidden thinking
+            # and return empty content, so explicitly turn reasoning off.
+            response = client.chat.completions.create(
+                extra_body={"reasoning": {"enabled": False}}, **kwargs
+            )
+        except Exception as exc:
+            if not self._is_bad_request(exc):
+                raise
+            # Provider rejected the reasoning flag: retry without it.
+            response = client.chat.completions.create(**kwargs)
 
         reply = (response.choices[0].message.content or "").strip().lower()
         if reply in TASK_KINDS:
@@ -659,10 +672,14 @@ class EasyChineseModelRouter:
 
     @staticmethod
     def _reasoning_body(model: ModelProfile, task: TaskKind) -> dict:
-        # Only ask for reasoning where it helps.
-        if model.reasoning and task in {"coding", "reasoning", "long_context"}:
+        # Only ask for reasoning where it helps. Reasoning-capable models
+        # think by default, so light tasks must explicitly turn it OFF or
+        # they silently pay for hidden thinking tokens.
+        if not model.reasoning:
+            return {}
+        if task in {"coding", "reasoning", "long_context"}:
             return {"reasoning": {"enabled": True}}
-        return {}
+        return {"reasoning": {"enabled": False}}
 
     @staticmethod
     def _is_auth_error(exc: Exception) -> bool:

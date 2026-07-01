@@ -247,8 +247,12 @@ class ReasoningBodyTests(unittest.TestCase):
         body = EasyChineseModelRouter._reasoning_body(self._model(True), "coding")
         self.assertEqual(body, {"reasoning": {"enabled": True}})
 
-    def test_no_reasoning_for_simple(self):
-        self.assertEqual(EasyChineseModelRouter._reasoning_body(self._model(True), "simple"), {})
+    def test_reasoning_disabled_for_simple(self):
+        # Reasoning models think by default; light tasks must opt OUT.
+        self.assertEqual(
+            EasyChineseModelRouter._reasoning_body(self._model(True), "simple"),
+            {"reasoning": {"enabled": False}},
+        )
 
     def test_no_reasoning_when_unsupported(self):
         self.assertEqual(EasyChineseModelRouter._reasoning_body(self._model(False), "coding"), {})
