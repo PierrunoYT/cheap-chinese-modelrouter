@@ -335,7 +335,10 @@ def main() -> int:
     parser.add_argument(
         "--family",
         action="append",
-        help="Restrict to a family: deepseek, qwen, kimi, glm, minimax, mimo. Can be repeated.",
+        help=(
+            "Restrict to a family: deepseek, qwen, kimi, glm, minimax, mimo, "
+            "inclusionai, tencent, bytedance. Can be repeated."
+        ),
     )
     parser.add_argument(
         "--no-sticky",

@@ -204,6 +204,55 @@ MODELS: list[ModelProfile] = [
         reasoning=True,
     ),
 
+    # inclusionAI (Ant Group)
+    ModelProfile(
+        name="ling_flash",
+        family="inclusionai",
+        model="inclusionai/ling-2.6-flash",
+        cost_score=0.5,
+        quality_score=7.0,  # unverified: not in AA benchmarks yet
+        strengths={"simple", "translation"},
+        max_context_tokens=262_000,
+        notes="Ultra-budget route: $0.01/M in, ~9x cheaper than deepseek-v4-flash.",
+    ),
+
+    # Tencent Hunyuan
+    ModelProfile(
+        name="hunyuan_3",
+        family="tencent",
+        model="tencent/hy3-preview",
+        cost_score=0.9,
+        quality_score=7.2,  # unverified: not in AA benchmarks yet
+        strengths={"simple"},
+        max_context_tokens=262_000,
+        notes="Hunyuan 3 preview build; very cheap general chat.",
+        reasoning=True,
+    ),
+
+    # ByteDance Seed
+    ModelProfile(
+        name="seed_mini",
+        family="bytedance",
+        model="bytedance-seed/seed-2.0-mini",
+        cost_score=1.3,
+        quality_score=7.3,  # unverified: not in AA benchmarks yet
+        strengths={"simple"},
+        max_context_tokens=262_000,
+        notes="Cheap ByteDance Seed tier.",
+        reasoning=True,
+    ),
+    ModelProfile(
+        name="seed_lite",
+        family="bytedance",
+        model="bytedance-seed/seed-2.0-lite",
+        cost_score=2.6,
+        quality_score=7.8,  # unverified: not in AA benchmarks yet
+        strengths={"simple"},
+        max_context_tokens=262_000,
+        notes="Stronger ByteDance Seed route.",
+        reasoning=True,
+    ),
+
     # Xiaomi MiMo
     ModelProfile(
         name="mimo_2_5",
@@ -1155,7 +1204,10 @@ def main() -> int:
     parser.add_argument(
         "--family",
         action="append",
-        help="Restrict to a family: deepseek, qwen, kimi, glm, minimax, mimo. Can be repeated.",
+        help=(
+            "Restrict to a family: deepseek, qwen, kimi, glm, minimax, mimo, "
+            "inclusionai, tencent, bytedance. Can be repeated."
+        ),
     )
     parser.add_argument(
         "--classifier",

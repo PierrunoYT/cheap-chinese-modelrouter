@@ -88,9 +88,13 @@ family. Catalog-validated and benchmark-calibrated 2026-07-01 (AA =
 | `minimax/minimax-m3` | 44 | simple, reasoning, long context, creative | #1 cohort AA-LCR + non-hallucination |
 | `moonshotai/kimi-k2.7-code` | 42 | coding, reasoning, long context | coding specialist (uncharted) |
 | `xiaomi/mimo-v2.5-pro` | 42 | coding, long context | weak reasoning benchmarks |
-| `deepseek/deepseek-v4-flash` | 40 | coding, translation | cheapest; heavy hallucinator on facts |
+| `deepseek/deepseek-v4-flash` | 40 | coding, translation | heavy hallucinator on facts |
 | `xiaomi/mimo-v2.5` | 40 (est.) | simple, coding, reasoning, long context | budget default |
 | `qwen/qwen3.7-plus` | 39 | simple, translation, creative, long context | budget tier |
+| `bytedance-seed/seed-2.0-lite` | unverified | simple | stronger Seed route |
+| `bytedance-seed/seed-2.0-mini` | unverified | simple | cheap Seed tier |
+| `tencent/hy3-preview` | unverified | simple | preview build, very cheap |
+| `inclusionai/ling-2.6-flash` | unverified | simple, translation | $0.01/M in — cheapest route |
 
 The table lives at the top of `router.py` (`MODELS`) and is meant to be
 edited: slugs drift (`--validate-models` checks them against the live
@@ -99,8 +103,10 @@ calibrated to the AA index (`7.6 + 0.1 * (index - 40)`), `strengths` to AA's
 per-domain charts (Coding/Agentic Index, AA-LCR, GPQA/HLE/CritPt,
 AA-Omniscience, IFBench), and with `--live-pricing` the cost scores are
 derived from OpenRouter's real price list (`1 + log2(price/cheapest)`, cached
-to disk daily, stale-tolerant offline). Candidates not yet added are tracked
-in `MODELS_TODO.md`.
+to disk daily, stale-tolerant offline). The four "unverified" models are not
+yet covered by Artificial Analysis; they carry conservative estimated scores
+until benchmarks land. Candidates not yet added are tracked in
+`MODELS_TODO.md`.
 
 With `--log-file`, every completed request appends a JSONL line with the
 routed model, task, latency, token counts (including hidden reasoning tokens)
