@@ -1,0 +1,176 @@
+# Easy Chinese Model Router
+
+A one-file router for cheap, capable Chinese LLMs (DeepSeek, Qwen, Kimi, GLM,
+MiniMax, MiMo) via [OpenRouter](https://openrouter.ai). It classifies each
+prompt locally (no LLM-in-the-loop), picks the best-fit model for the task and
+budget, and falls back through the remaining candidates on errors.
+
+Use it three ways:
+
+- **CLI** — `python router.py --prompt "..."`
+- **Python library** — `EasyChineseModelRouter().chat(...)`
+- **OpenAI-compatible server** — `python server.py`, then point OpenCode,
+  Cline, Zed, or any OpenAI SDK at it ([guide below](#use-with-opencode))
+
+Routing is **deterministic, offline, and auditable**: classification is
+keyword/heuristic based (English + Chinese patterns), and `--dry-run` explains
+every decision without a single network call.
+
+## Quick start
+
+```bash
+pip install -r requirements.txt
+
+# .env in the repo root:
+#   OPENROUTER_API_KEY=sk-or-...
+
+python router.py --prompt "fix this Python bug" --dry-run   # see the decision
+python router.py --prompt "write a FastAPI endpoint"        # actually chat
+```
+
+## How routing works
+
+1. **Classify** the prompt into a task kind — `simple`, `coding`, `reasoning`,
+   `long_context`, `translation`, or `creative` — using bilingual (EN + CJK)
+   keyword patterns and a CJK-aware token estimate.
+2. **Route**: filter the model table by context window, allowed families, and
+   tool support, then sort by a mode-dependent blend of cost and quality
+   scores, with a bonus for models whose strengths match the task.
+3. **Chat** with the top model; on retryable errors (429/5xx/timeouts) retry
+   with backoff, on hard errors fall through to the next model in the route.
+
+Modes: `auto` (default; cheap for simple tasks, stronger for coding/reasoning),
+`cheap`, `balanced`, `quality`.
+
+## CLI usage
+
+```bash
+python router.py --prompt "..." [options]
+
+--mode auto|cheap|balanced|quality   # routing strategy (default: auto)
+--family deepseek --family qwen      # restrict families (repeatable)
+--stream                             # stream tokens as they arrive
+--dry-run                            # print the routing decision, no network
+--session-id my-chat                 # pin follow-up turns to the same model
+--history msgs.json                  # prior turns as a JSON message list
+--list-models                        # print the built-in model table
+--validate-models                    # check slugs against the live catalog
+--max-tokens 2048  --temperature 0.2
+```
+
+The model table lives at the top of `router.py` (`MODELS`) and is meant to be
+edited: slugs drift, and `cost_score` / `quality_score` are subjective
+heuristics for relative ordering, not billing data.
+
+## OpenAI-compatible server
+
+```bash
+python server.py                     # http://127.0.0.1:8787/v1
+python server.py --port 9000 --family deepseek --family qwen
+```
+
+Endpoints:
+
+| Endpoint | Description |
+|---|---|
+| `POST /v1/chat/completions` | Streaming (SSE) and non-streaming; `tools` / `tool_calls` passed through |
+| `GET /v1/models` | The four routing modes, presented as models |
+| `GET /health` | Liveness check |
+
+The client requests a *mode* as its "model" (`auto`, `cheap`, `balanced`,
+`quality`; provider-prefixed ids like `myrouter/auto` also work), and the
+router picks the actual model per request. Your OpenRouter key stays on the
+server — clients never see it. Each conversation is pinned to its
+first-routed model (best-effort, keyed by a hash of the first user message) so
+provider prompt caches stay warm across agent turns.
+
+Quick check with curl:
+
+```bash
+curl http://127.0.0.1:8787/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model": "auto", "messages": [{"role": "user", "content": "hello"}]}'
+```
+
+### Use with OpenCode
+
+1. Start the server: `python server.py`
+2. Add the provider to your `opencode.json` (project-level, or global at
+   `~/.config/opencode/opencode.json`):
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "myrouter": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Chinese Model Router",
+      "options": { "baseURL": "http://127.0.0.1:8787/v1" },
+      "models": {
+        "auto":    { "name": "Router (auto)" },
+        "cheap":   { "name": "Router (cheap)" },
+        "quality": { "name": "Router (quality)" }
+      }
+    }
+  },
+  "model": "myrouter/auto"
+}
+```
+
+3. Launch `opencode`. Use `/models` inside OpenCode to switch between the
+   router modes.
+
+Notes:
+
+- The `/v1` suffix in `baseURL` is required — OpenCode expects an
+  OpenAI-compatible endpoint.
+- Setting the top-level `"model"` matters; leaving it blank causes confusing
+  errors in some OpenCode versions.
+- No API key is needed on the OpenCode side (the server holds the OpenRouter
+  key). If your OpenCode version insists on one, set any placeholder value.
+
+The same provider block works for Cline, Zed, and anything else that speaks
+the OpenAI chat-completions protocol — only the config file differs.
+
+## Evals
+
+An offline harness proves the classifier works and guards against regressions:
+
+```bash
+python evals/run_eval.py                    # accuracy, confusion, mode comparison
+python evals/run_eval.py --json             # machine-readable report
+python evals/run_eval.py --update-baseline  # record the new baseline
+```
+
+The labeled set (`evals/prompts.jsonl`, EN + ZH + mixed across all six task
+kinds) currently scores 98.1% classification accuracy. The harness exits
+non-zero if accuracy drops below `--min-accuracy` (default 90%) or below the
+recorded baseline.
+
+## Tests
+
+```bash
+python -m unittest discover -s tests -v
+```
+
+No test touches the network; the server tests run against a stub router on
+localhost.
+
+## Configuration
+
+| Env var | Purpose |
+|---|---|
+| `OPENROUTER_API_KEY` | Required. Your OpenRouter key (put it in `.env`) |
+| `OPENROUTER_REFERER` | Optional. Sent as `HTTP-Referer` for attribution |
+| `OPENROUTER_APP_NAME` | Optional. Sent as `X-Title` for attribution |
+
+## Repo layout
+
+```
+router.py            # model table, classifier, router, OpenRouter client, CLI
+server.py            # OpenAI-compatible HTTP server (stdlib only)
+evals/               # labeled prompt set + offline eval harness
+tests/               # unit + HTTP integration tests (no network)
+FEATURES_TODO.md     # feature backlog and completed-feature notes
+MODELS_TODO.md       # model families still to add
+```
