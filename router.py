@@ -93,9 +93,7 @@ class ModelProfile:
 # v4.1 via quality = 7.6 + 0.1 * (index - 40), so one index point = 0.1
 # quality. Scores taken from artificialanalysis.ai model pages (primary
 # source, fetched 2026-07-01) -- aggregator/search-snippet numbers proved
-# unreliable. Kimi K2.7-code carries a small allowance above its
-# general-intelligence index because it is a coding specialist and the
-# router mostly sends it coding tasks.
+# unreliable.
 #
 # strengths: grounded in AA's per-domain charts (Coding Index, Agentic
 # Index, AA-LCR, GPQA/HLE/CritPt, AA-Omniscience, IFBench; read
@@ -164,10 +162,11 @@ MODELS: list[ModelProfile] = [
         family="kimi",
         model="moonshotai/kimi-k2.7-code",
         cost_score=2.7,
-        quality_score=8.2,  # AA index 42 + coding-specialist allowance
-        # AA per-domain charts only cover K2.6 (general), not K2.7-code, so
-        # strengths kept on the coding-specialist assumption.
-        strengths={"coding", "reasoning", "long_context"},
+        quality_score=7.8,  # AA index 42 (verified 2026-07-02)
+        # AA charts: Coding Index 60.8 (#3 cohort) confirms the coding
+        # specialty, but reasoning (HLE 33), agentic (29.6), AA-LCR (66) and
+        # non-hallucination (20%) are all mid-to-weak -> coding only.
+        strengths={"coding"},
         max_context_tokens=262_000,
         notes="Strong coding/agent model from Moonshot Kimi family.",
         reasoning=True,
@@ -220,10 +219,10 @@ MODELS: list[ModelProfile] = [
         family="inclusionai",
         model="inclusionai/ring-2.6-1t",
         cost_score=1.6,
-        quality_score=7.2,  # est. from AA per-eval charts (no overall index yet)
-        # AA charts: Coding Index 42.8 (best relative domain, Terminal-Bench
-        # 43%) but weak agentic (18.9), reasoning (HLE ~18) and
-        # non-hallucination (~13%) -> cheap coding fallback only.
+        quality_score=6.7,  # AA index 31 (verified 2026-07-02)
+        # AA charts: Coding Index 42.8 is its best relative domain, but weak
+        # agentic (18.9), reasoning (HLE 18) and non-hallucination (16%)
+        # -> cheap coding fallback only.
         strengths={"coding"},
         max_context_tokens=262_000,
         notes="1T-param Ring reasoning model; budget coding route.",
@@ -236,7 +235,7 @@ MODELS: list[ModelProfile] = [
         family="tencent",
         model="tencent/hy3-preview",
         cost_score=0.9,
-        quality_score=7.2,  # unverified: not in AA benchmarks yet
+        quality_score=7.0,  # AA index 34 (AA's own estimate, 2026-07-02)
         strengths={"simple"},
         max_context_tokens=262_000,
         notes="Hunyuan 3 preview build; very cheap general chat.",

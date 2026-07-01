@@ -86,15 +86,15 @@ family. Catalog-validated and benchmark-calibrated 2026-07-01 (AA =
 | `qwen/qwen3.7-max` | 46 | coding, reasoning, creative | #2 cohort coding |
 | `deepseek/deepseek-v4-pro` | 44 | reasoning, coding | #2 cohort agentic |
 | `minimax/minimax-m3` | 44 | simple, reasoning, long context, creative | #1 cohort AA-LCR + non-hallucination |
-| `moonshotai/kimi-k2.7-code` | 42 | coding, reasoning, long context | coding specialist (uncharted) |
+| `moonshotai/kimi-k2.7-code` | 42 | coding | coding specialist (Coding Index 60.8, #3 cohort) |
 | `xiaomi/mimo-v2.5-pro` | 42 | coding, long context | weak reasoning benchmarks |
 | `deepseek/deepseek-v4-flash` | 40 | coding, translation | heavy hallucinator on facts |
 | `xiaomi/mimo-v2.5` | 40 (est.) | simple, coding, reasoning, long context | budget default |
 | `qwen/qwen3.7-plus` | 39 | simple, translation, creative, long context | budget tier |
 | `bytedance-seed/seed-2.0-lite` | unverified | simple | stronger Seed route |
 | `bytedance-seed/seed-2.0-mini` | unverified | simple | cheap Seed tier |
-| `tencent/hy3-preview` | unverified | simple | preview build, very cheap |
-| `inclusionai/ring-2.6-1t` | ~7.2 (est.) | coding | AA Coding Index 42.8; budget coding fallback |
+| `tencent/hy3-preview` | 34 (AA est.) | simple | preview build, very cheap |
+| `inclusionai/ring-2.6-1t` | 31 | coding | Coding Index 42.8; budget coding fallback |
 | `inclusionai/ling-2.6-flash` | unverified | simple, translation | $0.01/M in — cheapest route |
 
 The table lives at the top of `router.py` (`MODELS`) and is meant to be
