@@ -86,9 +86,15 @@ class ModelProfile:
 #   Use: python router.py --list-models     to print this table
 #   Use: python router.py --validate-models  to check slugs against the live catalog
 #
-# NOTE: cost_score and quality_score are SUBJECTIVE HEURISTICS for relative
-# ordering only -- they are not derived from OpenRouter pricing or published
-# benchmarks. Tune them to taste; they affect routing order, not billing.
+# cost_score: subjective by default, or derived from live OpenRouter pricing
+# with --live-pricing (1 + log2(price/cheapest)).
+#
+# quality_score: calibrated to the Artificial Analysis Intelligence Index
+# v4.1 (2026-07-01) via quality = 7.6 + 0.1 * (index - 40), so one index
+# point = 0.1 quality. Models the index doesn't cover keep an estimate and
+# are marked "unverified" in their notes. Kimi K2.7-code carries a small
+# allowance above its general-intelligence index because it is a coding
+# specialist and the router mostly sends it coding tasks.
 MODELS: list[ModelProfile] = [
     # DeepSeek
     ModelProfile(
@@ -96,7 +102,7 @@ MODELS: list[ModelProfile] = [
         family="deepseek",
         model="deepseek/deepseek-v4-flash",
         cost_score=1.0,
-        quality_score=7.6,
+        quality_score=7.6,  # AA index 40 (up to 47 at max reasoning effort)
         strengths={"simple", "coding", "long_context", "translation"},
         max_context_tokens=1_000_000,
         notes="Cheap default. Good for simple/coding/long-context first pass.",
@@ -107,7 +113,7 @@ MODELS: list[ModelProfile] = [
         family="deepseek",
         model="deepseek/deepseek-v4-pro",
         cost_score=2.2,
-        quality_score=8.5,
+        quality_score=8.8,  # AA index 52, #2 open-weights reasoning model
         strengths={"reasoning", "coding", "long_context"},
         max_context_tokens=1_000_000,
         notes="Stronger DeepSeek option for reasoning and larger coding tasks.",
@@ -120,7 +126,7 @@ MODELS: list[ModelProfile] = [
         family="qwen",
         model="qwen/qwen3.7-plus",
         cost_score=1.5,
-        quality_score=8.1,
+        quality_score=8.1,  # unverified: no AA index score yet
         strengths={"simple", "translation", "creative", "long_context"},
         max_context_tokens=1_000_000,
         notes="Current-gen Qwen mid-tier: cheap, 1M context.",
@@ -131,7 +137,7 @@ MODELS: list[ModelProfile] = [
         family="qwen",
         model="qwen/qwen3.7-max",
         cost_score=3.4,
-        quality_score=8.8,
+        quality_score=8.2,  # AA index 46
         strengths={"coding", "reasoning", "creative"},
         max_context_tokens=1_000_000,
         notes="Flagship Qwen (3.7) for coding and reasoning.",
@@ -144,7 +150,7 @@ MODELS: list[ModelProfile] = [
         family="kimi",
         model="moonshotai/kimi-k2.7-code",
         cost_score=2.7,
-        quality_score=8.7,
+        quality_score=8.2,  # AA index 42 + coding-specialist allowance
         strengths={"coding", "reasoning", "long_context"},
         max_context_tokens=262_000,
         notes="Strong coding/agent model from Moonshot Kimi family.",
@@ -157,7 +163,7 @@ MODELS: list[ModelProfile] = [
         family="glm",
         model="z-ai/glm-5.2",
         cost_score=2.5,
-        quality_score=8.9,
+        quality_score=8.7,  # AA index 51
         strengths={"reasoning", "coding", "long_context"},
         max_context_tokens=1_000_000,
         notes="High-quality GLM route for reasoning, coding and long tasks.",
@@ -170,7 +176,7 @@ MODELS: list[ModelProfile] = [
         family="minimax",
         model="minimax/minimax-m3",
         cost_score=2.1,
-        quality_score=8.4,
+        quality_score=8.0,  # AA index 44
         strengths={"coding", "reasoning", "long_context", "creative"},
         max_context_tokens=1_000_000,
         notes="More capable MiniMax route with long-context support.",
@@ -183,7 +189,7 @@ MODELS: list[ModelProfile] = [
         family="mimo",
         model="xiaomi/mimo-v2.5",
         cost_score=1.2,
-        quality_score=8.2,
+        quality_score=8.2,  # unverified: no AA index score for the base model
         strengths={"coding", "reasoning", "long_context", "simple"},
         max_context_tokens=1_000_000,
         notes="Low-cost MiMo route, good for agentic and long-context work.",
@@ -194,7 +200,7 @@ MODELS: list[ModelProfile] = [
         family="mimo",
         model="xiaomi/mimo-v2.5-pro",
         cost_score=2.4,
-        quality_score=9.0,
+        quality_score=9.0,  # AA index 54, top open-weights model (tied Kimi K2.6)
         strengths={"coding", "reasoning", "long_context"},
         max_context_tokens=1_000_000,
         notes="Flagship MiMo route for harder coding/agent tasks.",

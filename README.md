@@ -85,11 +85,12 @@ Current-generation models only, one budget and/or one flagship route per family
 
 The table lives at the top of `router.py` (`MODELS`) and is meant to be
 edited: slugs drift (`--validate-models` checks them against the live
-catalog). `cost_score` / `quality_score` default to subjective heuristics for
-relative ordering — but with `--live-pricing` the cost scores are derived from
-OpenRouter's real price list instead (`1 + log2(price/cheapest)`, cached to
-disk daily, stale-tolerant offline). Candidates not yet added are tracked in
-`MODELS_TODO.md`.
+catalog). Both score axes are grounded in data: `quality_score` is calibrated
+to the [Artificial Analysis Intelligence Index](https://artificialanalysis.ai/leaderboards/models)
+(v4.1, 2026-07-01; `7.6 + 0.1 * (index - 40)`), and with `--live-pricing` the
+cost scores are derived from OpenRouter's real price list
+(`1 + log2(price/cheapest)`, cached to disk daily, stale-tolerant offline).
+Candidates not yet added are tracked in `MODELS_TODO.md`.
 
 With `--log-file`, every completed request appends a JSONL line with the
 routed model, task, latency, token counts (including hidden reasoning tokens)
