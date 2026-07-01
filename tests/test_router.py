@@ -10,6 +10,8 @@ from router import (  # noqa: E402
     EasyChineseModelRouter,
     ModelProfile,
     StreamResult,
+    blended_price,
+    derive_cost_scores,
 )
 
 
@@ -215,6 +217,85 @@ class LlmClassifierTests(unittest.TestCase):
         os.environ["OPENROUTER_API_KEY"] = "sk-test-dummy"
         with self.assertRaises(ValueError):
             router._classify_llm("whatever")
+
+
+class LivePricingTests(unittest.TestCase):
+    def _model(self, name, slug, cost=9.9):
+        return ModelProfile(
+            name=name, family="t", model=slug,
+            cost_score=cost, quality_score=5.0,
+        )
+
+    def test_cheapest_scores_one_and_doublings_add_one(self):
+        models = [
+            self._model("cheap", "t/cheap"),
+            self._model("mid", "t/mid"),
+            self._model("dear", "t/dear"),
+        ]
+        pricing = {
+            "t/cheap": (0.10, 0.10),  # blended 0.10
+            "t/mid": (0.20, 0.20),    # 2x cheapest
+            "t/dear": (0.80, 0.80),   # 8x cheapest
+        }
+        scored = {m.name: m.cost_score for m in derive_cost_scores(models, pricing)}
+        self.assertEqual(scored["cheap"], 1.0)
+        self.assertEqual(scored["mid"], 2.0)   # 1 + log2(2)
+        self.assertEqual(scored["dear"], 4.0)  # 1 + log2(8)
+
+    def test_missing_slug_keeps_static_score(self):
+        models = [self._model("known", "t/known"), self._model("unknown", "t/unknown")]
+        scored = {
+            m.name: m.cost_score
+            for m in derive_cost_scores(models, {"t/known": (0.10, 0.10)})
+        }
+        self.assertEqual(scored["known"], 1.0)
+        self.assertEqual(scored["unknown"], 9.9)
+
+    def test_empty_pricing_is_a_noop(self):
+        models = [self._model("a", "t/a")]
+        self.assertEqual(derive_cost_scores(models, {})[0].cost_score, 9.9)
+
+    def test_blended_price_is_input_weighted(self):
+        self.assertAlmostEqual(blended_price(1.0, 3.0), 1.5)
+
+    def test_router_defaults_to_static_scores(self):
+        # No live_pricing flag: table untouched, no network needed.
+        router = EasyChineseModelRouter()
+        self.assertFalse(router.live_pricing)
+
+
+class RequestLogTests(unittest.TestCase):
+    def test_log_line_written(self):
+        import json
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            log_path = os.path.join(tmp, "req.jsonl")
+            router = EasyChineseModelRouter(log_file=log_path)
+            router._log_request(
+                "coding",
+                "sess-1",
+                {
+                    "model": "t/x",
+                    "latency_ms": 123,
+                    "usage": {
+                        "prompt_tokens": 10,
+                        "completion_tokens": 5,
+                        "cost": 0.00012,
+                        "completion_tokens_details": {"reasoning_tokens": 2},
+                    },
+                },
+            )
+            with open(log_path, encoding="utf-8") as fh:
+                record = json.loads(fh.readline())
+            self.assertEqual(record["task"], "coding")
+            self.assertEqual(record["model"], "t/x")
+            self.assertEqual(record["latency_ms"], 123)
+            self.assertEqual(record["cost_usd"], 0.00012)
+            self.assertEqual(record["reasoning_tokens"], 2)
+
+    def test_no_log_file_is_a_noop(self):
+        EasyChineseModelRouter()._log_request("simple", None, {"model": "t/x"})
 
 
 class ErrorClassificationTests(unittest.TestCase):

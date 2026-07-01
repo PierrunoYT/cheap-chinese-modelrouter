@@ -147,11 +147,15 @@ class RouterServer(ThreadingHTTPServer):
         sticky: bool = True,
         classifier: str = "keyword",
         classifier_model: str | None = None,
+        live_pricing: bool = False,
+        log_file: str | None = None,
     ) -> None:
         super().__init__(address, RouterHTTPHandler)
         self.allow_families = allow_families
         self.classifier = classifier
         self.classifier_model = classifier_model
+        self.live_pricing = live_pricing
+        self.log_file = log_file
         self.sticky_store = (
             os.path.join(tempfile.gettempdir(), "echinese_router_sessions.json")
             if sticky
@@ -169,6 +173,8 @@ class RouterServer(ThreadingHTTPServer):
                 allow_families=self.allow_families,
                 sticky_store=self.sticky_store,
                 classifier=self.classifier,  # type: ignore[arg-type]
+                live_pricing=self.live_pricing,
+                log_file=self.log_file,
                 **kwargs,
             )
         return self._routers[mode]
@@ -349,6 +355,15 @@ def main() -> int:
         "--classifier-model",
         help="Model slug used by --classifier llm (default: cheapest in the table)",
     )
+    parser.add_argument(
+        "--live-pricing",
+        action="store_true",
+        help="Derive cost scores from OpenRouter's live price list (cached daily)",
+    )
+    parser.add_argument(
+        "--log-file",
+        help="Append one JSONL line per request (model, task, latency, real cost)",
+    )
     args = parser.parse_args()
 
     if not os.getenv("OPENROUTER_API_KEY"):
@@ -363,6 +378,8 @@ def main() -> int:
         sticky=not args.no_sticky,
         classifier=args.classifier,
         classifier_model=args.classifier_model,
+        live_pricing=args.live_pricing,
+        log_file=args.log_file,
     )
 
     print(f"Router API listening on http://{args.host}:{args.port}/v1")

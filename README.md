@@ -57,6 +57,8 @@ python router.py --prompt "..." [options]
 --mode auto|cheap|balanced|quality   # routing strategy (default: auto)
 --classifier keyword|llm             # task detection (default: keyword/offline)
 --classifier-model <slug>            # model for --classifier llm
+--live-pricing                       # cost scores from live OpenRouter prices
+--log-file requests.jsonl            # per-request model/latency/cost log
 --family deepseek --family qwen      # restrict families (repeatable)
 --stream                             # stream tokens as they arrive
 --dry-run                            # print the routing decision, no network
@@ -83,9 +85,16 @@ Current-generation models only, one budget and/or one flagship route per family
 
 The table lives at the top of `router.py` (`MODELS`) and is meant to be
 edited: slugs drift (`--validate-models` checks them against the live
-catalog), and `cost_score` / `quality_score` are subjective heuristics for
-relative ordering, not billing data. Candidates not yet added are tracked in
+catalog). `cost_score` / `quality_score` default to subjective heuristics for
+relative ordering — but with `--live-pricing` the cost scores are derived from
+OpenRouter's real price list instead (`1 + log2(price/cheapest)`, cached to
+disk daily, stale-tolerant offline). Candidates not yet added are tracked in
 `MODELS_TODO.md`.
+
+With `--log-file`, every completed request appends a JSONL line with the
+routed model, task, latency, token counts (including hidden reasoning tokens)
+and the actual cost reported by OpenRouter — so the router's spending is
+auditable after the fact, not just its decisions.
 
 ## OpenAI-compatible server
 
@@ -93,6 +102,7 @@ relative ordering, not billing data. Candidates not yet added are tracked in
 python server.py                     # http://127.0.0.1:8787/v1
 python server.py --port 9000 --family deepseek --family qwen
 python server.py --classifier llm    # LLM-based task detection (see above)
+python server.py --live-pricing --log-file requests.jsonl
 ```
 
 Endpoints:

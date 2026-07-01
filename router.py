@@ -14,13 +14,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import random
 import re
 import sys
 import tempfile
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Iterable, Iterator, Literal
 
 try:
@@ -52,6 +53,8 @@ DEFAULT_CLASSIFIER_MODEL = "deepseek/deepseek-v4-flash"
 TASK_KINDS: set[str] = {
     "simple", "coding", "reasoning", "long_context", "translation", "creative",
 }
+
+PRICING_CACHE_TTL = 86_400.0  # refresh live pricing at most once a day
 
 CLASSIFIER_INSTRUCTION = (
     "Classify the user request into exactly one category:\n"
@@ -200,6 +203,97 @@ MODELS: list[ModelProfile] = [
 ]
 
 
+# ---------------------------------------------------------------------------
+# Live pricing -> cost scores
+# ---------------------------------------------------------------------------
+
+def fetch_openrouter_pricing() -> dict[str, tuple[float, float]]:
+    """Fetch live per-token pricing from OpenRouter's public catalog.
+
+    Returns {model_slug: ($/M prompt tokens, $/M completion tokens)}.
+    """
+    import urllib.request
+
+    with urllib.request.urlopen(f"{OPENROUTER_BASE_URL}/models", timeout=15) as resp:
+        data = json.load(resp)["data"]
+
+    pricing: dict[str, tuple[float, float]] = {}
+    for entry in data:
+        p = entry.get("pricing") or {}
+        try:
+            pricing[entry["id"]] = (
+                float(p.get("prompt") or 0) * 1e6,
+                float(p.get("completion") or 0) * 1e6,
+            )
+        except (TypeError, ValueError, KeyError):
+            continue
+    return pricing
+
+
+def load_pricing(
+    cache_path: str, ttl: float = PRICING_CACHE_TTL
+) -> dict[str, tuple[float, float]] | None:
+    """Live pricing with a file cache: fresh cache, else network, else stale cache."""
+    stale: dict[str, tuple[float, float]] | None = None
+    try:
+        with open(cache_path, "r", encoding="utf-8") as fh:
+            raw = json.load(fh)
+        cached = {k: (float(v[0]), float(v[1])) for k, v in raw["pricing"].items()}
+        if time.time() - float(raw["fetched_at"]) < ttl:
+            return cached
+        stale = cached
+    except (OSError, ValueError, TypeError, KeyError):
+        pass
+
+    try:
+        pricing = fetch_openrouter_pricing()
+    except Exception:
+        return stale  # offline: a stale price list still beats hand-tuned guesses
+
+    try:
+        tmp = cache_path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump({"fetched_at": time.time(), "pricing": pricing}, fh)
+        os.replace(tmp, cache_path)
+    except OSError:
+        pass
+    return pricing
+
+
+def blended_price(prompt_per_m: float, completion_per_m: float) -> float:
+    """Single $/M figure per model. Input-weighted (0.75/0.25) because router
+    workloads (chat with history, agent loops) are prompt-heavy."""
+    return 0.75 * prompt_per_m + 0.25 * completion_per_m
+
+
+def derive_cost_scores(
+    models: list[ModelProfile], pricing: dict[str, tuple[float, float]]
+) -> list[ModelProfile]:
+    """Replace hand-tuned cost_score with one derived from real pricing.
+
+    score = 1 + log2(price / cheapest): the cheapest model scores 1.0 and each
+    doubling in price adds 1. Log-compression keeps a 17x price spread from
+    drowning out the quality term in the mode formulas, preserving the scale
+    the hand-tuned scores used (roughly 1-5). Models missing from the pricing
+    map keep their static score.
+    """
+    blended = {
+        m.name: blended_price(*pricing[m.model])
+        for m in models
+        if m.model in pricing and blended_price(*pricing[m.model]) > 0
+    }
+    if not blended:
+        return list(models)
+
+    cheapest = min(blended.values())
+    return [
+        replace(m, cost_score=round(1 + math.log2(blended[m.name] / cheapest), 2))
+        if m.name in blended
+        else m
+        for m in models
+    ]
+
+
 class StreamResult:
     """Iterator over streamed content chunks.
 
@@ -234,6 +328,9 @@ class EasyChineseModelRouter:
         sticky_store: str | None = None,
         classifier: Literal["keyword", "llm"] = "keyword",
         classifier_model: str = DEFAULT_CLASSIFIER_MODEL,
+        live_pricing: bool = False,
+        pricing_cache: str | None = None,
+        log_file: str | None = None,
     ) -> None:
         self.models = list(models)
         self.mode = mode
@@ -241,9 +338,25 @@ class EasyChineseModelRouter:
         self.allow_families = {f.lower() for f in allow_families} if allow_families else None
         self.classifier = classifier
         self.classifier_model = classifier_model
-        # Memo of the last classification so classify() called from both
-        # chat() and route() costs at most one LLM call per request.
-        self._classify_cache: tuple[str, TaskKind] | None = None
+        # Bounded memo so repeat classifications (chat() + route(), or repeated
+        # prompts against a long-lived router) cost at most one LLM call each.
+        self._classify_cache: dict[str, TaskKind] = {}
+
+        # Optional JSONL request log: one line per completed call with model,
+        # task, latency and the actual cost reported by OpenRouter.
+        self.log_file = log_file
+
+        # Optional: replace hand-tuned cost_score with scores derived from the
+        # live OpenRouter price list (cached to disk, stale-tolerant offline).
+        self.live_pricing = False
+        if live_pricing:
+            pricing = load_pricing(
+                pricing_cache
+                or os.path.join(tempfile.gettempdir(), "echinese_router_pricing.json")
+            )
+            if pricing:
+                self.models = derive_cost_scores(self.models, pricing)
+                self.live_pricing = True
 
         # Session stickiness: once a session routes to a model, reuse it for
         # follow-up turns so the provider prompt cache stays warm and the
@@ -276,8 +389,11 @@ class EasyChineseModelRouter:
         if not self.sticky_store:
             return
         try:
-            with open(self.sticky_store, "w", encoding="utf-8") as fh:
+            # Atomic replace so concurrent CLI runs never read a half-written file.
+            tmp = f"{self.sticky_store}.{os.getpid()}.tmp"
+            with open(tmp, "w", encoding="utf-8") as fh:
                 json.dump(self._sticky_choices, fh)
+            os.replace(tmp, self.sticky_store)
         except OSError:
             pass  # persistence is best-effort; never fail a chat over it
 
@@ -356,14 +472,17 @@ class EasyChineseModelRouter:
             return "long_context"
 
         if self.classifier == "llm":
-            if self._classify_cache and self._classify_cache[0] == prompt:
-                return self._classify_cache[1]
+            cached = self._classify_cache.get(prompt)
+            if cached is not None:
+                return cached
             try:
                 task = self._classify_llm(prompt)
             except Exception:
                 # Offline, bad key, timeout, junk reply: keyword fallback.
                 task = self.classify_keyword(prompt)
-            self._classify_cache = (prompt, task)
+            if len(self._classify_cache) >= 128:
+                self._classify_cache.pop(next(iter(self._classify_cache)))
+            self._classify_cache[prompt] = task
             return task
 
         return self.classify_keyword(prompt)
@@ -589,12 +708,14 @@ class EasyChineseModelRouter:
             return {
                 "task": task,
                 "classifier": self.classifier,
+                "live_pricing": self.live_pricing,
                 "mode": self.mode,
                 "session_id": session_id,
                 "sticky": bool(session_id) and session_id in self._sticky_choices,
                 "selected": route[0].name,
                 "selected_family": route[0].family,
                 "selected_model": route[0].model,
+                "selected_cost_score": route[0].cost_score,
                 "fallback_order": [m.model for m in route],
             }
 
@@ -618,6 +739,7 @@ class EasyChineseModelRouter:
         for model in route:
             for attempt in range(1, self.max_retries_per_model + 1):
                 try:
+                    started = time.time()
                     result = self._call_openrouter(
                         api_key=api_key,
                         model=model,
@@ -628,7 +750,9 @@ class EasyChineseModelRouter:
                         tools=tools,
                         tool_choice=tool_choice,
                     )
+                    result["latency_ms"] = int((time.time() - started) * 1000)
                     self._remember_sticky(session_id, model.name)
+                    self._log_request(task, session_id, result)
                     return result
                 except Exception as exc:
                     errors.append(
@@ -647,6 +771,31 @@ class EasyChineseModelRouter:
                     self._sleep_backoff(attempt, exc)
 
         raise RuntimeError("All routed models failed:\n" + "\n".join(errors[-12:]))
+
+    def _log_request(self, task: TaskKind, session_id: str | None, result: dict) -> None:
+        """Append one JSONL line per completed request (best-effort)."""
+        if not self.log_file:
+            return
+        usage = result.get("usage") or {}
+        record = {
+            "ts": round(time.time(), 3),
+            "task": task,
+            "mode": self.mode,
+            "session_id": session_id,
+            "model": result.get("model"),
+            "latency_ms": result.get("latency_ms"),
+            "prompt_tokens": usage.get("prompt_tokens"),
+            "completion_tokens": usage.get("completion_tokens"),
+            "reasoning_tokens": (usage.get("completion_tokens_details") or {}).get(
+                "reasoning_tokens"
+            ),
+            "cost_usd": usage.get("cost"),
+        }
+        try:
+            with open(self.log_file, "a", encoding="utf-8") as fh:
+                fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+        except OSError:
+            pass
 
     @staticmethod
     def _build_headers() -> dict[str, str]:
@@ -791,6 +940,7 @@ class EasyChineseModelRouter:
         for model in route:
             for attempt in range(1, self.max_retries_per_model + 1):
                 content_started = False
+                started = time.time()
                 try:
                     gen = self._call_openrouter_stream(
                         api_key=api_key,
@@ -806,8 +956,11 @@ class EasyChineseModelRouter:
                         try:
                             chunk = next(gen)
                         except StopIteration as stop:
+                            meta = stop.value or {}
+                            meta["latency_ms"] = int((time.time() - started) * 1000)
                             self._remember_sticky(session_id, model.name)
-                            return stop.value or {}
+                            self._log_request(task, session_id, meta)
+                            return meta
                         content_started = True
                         yield chunk
                 except Exception as exc:
@@ -989,6 +1142,18 @@ def main() -> int:
         default=DEFAULT_CLASSIFIER_MODEL,
         help=f"Model slug used by --classifier llm (default: {DEFAULT_CLASSIFIER_MODEL})",
     )
+    parser.add_argument(
+        "--live-pricing",
+        action="store_true",
+        help=(
+            "Derive cost scores from OpenRouter's live price list instead of the "
+            "hand-tuned table values (cached to disk for a day; offline-tolerant)."
+        ),
+    )
+    parser.add_argument(
+        "--log-file",
+        help="Append one JSONL line per request (model, task, latency, real cost)",
+    )
     parser.add_argument("--max-tokens", type=int, default=2048)
     parser.add_argument("--temperature", type=float, default=0.2)
     parser.add_argument("--dry-run", action="store_true", help="Only show routing decision")
@@ -1051,6 +1216,8 @@ def main() -> int:
         sticky_store=sticky_store,
         classifier=args.classifier,
         classifier_model=args.classifier_model,
+        live_pricing=args.live_pricing,
+        log_file=args.log_file,
     )
 
     history: list[dict] | None = None
