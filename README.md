@@ -12,9 +12,11 @@ Use it three ways:
 - **OpenAI-compatible server** — `python server.py`, then point OpenCode,
   Cline, Zed, or any OpenAI SDK at it ([guide below](#use-with-opencode))
 
-Routing is **deterministic, offline, and auditable**: classification is
-keyword/heuristic based (English + Chinese patterns), and `--dry-run` explains
-every decision without a single network call.
+Routing is **auditable** and, by default, **deterministic and offline**:
+classification is keyword/heuristic based (English + Chinese patterns), and
+`--dry-run` explains every decision without a single network call. For better
+accuracy, `--classifier llm` labels the task with a cheap model instead
+(~50-token call, falls back to keywords on any error).
 
 ## Quick start
 
@@ -32,12 +34,17 @@ python router.py --prompt "write a FastAPI endpoint"        # actually chat
 
 1. **Classify** the prompt into a task kind — `simple`, `coding`, `reasoning`,
    `long_context`, `translation`, or `creative` — using bilingual (EN + CJK)
-   keyword patterns and a CJK-aware token estimate.
+   keyword patterns and a CJK-aware token estimate. With `--classifier llm`,
+   a cheap model does the labeling instead (long-context is always decided
+   locally from the token estimate; keyword fallback on any error).
 2. **Route**: filter the model table by context window, allowed families, and
    tool support, then sort by a mode-dependent blend of cost and quality
    scores, with a bonus for models whose strengths match the task.
 3. **Chat** with the top model; on retryable errors (429/5xx/timeouts) retry
    with backoff, on hard errors fall through to the next model in the route.
+   Reasoning is enabled for coding/reasoning/long-context tasks and explicitly
+   disabled for light ones — the catalog's models all think by default, and
+   hidden thinking tokens can dominate the cost of a simple request.
 
 Modes: `auto` (default; cheap for simple tasks, stronger for coding/reasoning),
 `cheap`, `balanced`, `quality`.
@@ -48,6 +55,8 @@ Modes: `auto` (default; cheap for simple tasks, stronger for coding/reasoning),
 python router.py --prompt "..." [options]
 
 --mode auto|cheap|balanced|quality   # routing strategy (default: auto)
+--classifier keyword|llm             # task detection (default: keyword/offline)
+--classifier-model <slug>            # model for --classifier llm
 --family deepseek --family qwen      # restrict families (repeatable)
 --stream                             # stream tokens as they arrive
 --dry-run                            # print the routing decision, no network
@@ -58,15 +67,32 @@ python router.py --prompt "..." [options]
 --max-tokens 2048  --temperature 0.2
 ```
 
-The model table lives at the top of `router.py` (`MODELS`) and is meant to be
-edited: slugs drift, and `cost_score` / `quality_score` are subjective
-heuristics for relative ordering, not billing data.
+## Models
+
+Current-generation models only, one budget and/or one flagship route per family
+(catalog-validated 2026-07-01):
+
+| Family | Budget route | Flagship route |
+|---|---|---|
+| DeepSeek | `deepseek/deepseek-v4-flash` | `deepseek/deepseek-v4-pro` |
+| Qwen | `qwen/qwen3.7-plus` | `qwen/qwen3.7-max` |
+| Kimi (Moonshot) | — | `moonshotai/kimi-k2.7-code` |
+| GLM (Z.ai) | — | `z-ai/glm-5.2` |
+| MiniMax | — | `minimax/minimax-m3` |
+| MiMo (Xiaomi) | `xiaomi/mimo-v2.5` | `xiaomi/mimo-v2.5-pro` |
+
+The table lives at the top of `router.py` (`MODELS`) and is meant to be
+edited: slugs drift (`--validate-models` checks them against the live
+catalog), and `cost_score` / `quality_score` are subjective heuristics for
+relative ordering, not billing data. Candidates not yet added are tracked in
+`MODELS_TODO.md`.
 
 ## OpenAI-compatible server
 
 ```bash
 python server.py                     # http://127.0.0.1:8787/v1
 python server.py --port 9000 --family deepseek --family qwen
+python server.py --classifier llm    # LLM-based task detection (see above)
 ```
 
 Endpoints:
