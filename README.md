@@ -2,8 +2,9 @@
 
 A one-file router for cheap, capable Chinese LLMs (DeepSeek, Qwen, Kimi, GLM,
 MiniMax, MiMo) via [OpenRouter](https://openrouter.ai). It classifies each
-prompt locally (no LLM-in-the-loop), picks the best-fit model for the task and
-budget, and falls back through the remaining candidates on errors.
+prompt, picks the best-fit model for the task and budget — using
+benchmark-grounded quality and strength data, not guesses — and falls back
+through the remaining candidates on errors.
 
 Use it three ways:
 
@@ -39,7 +40,11 @@ python router.py --prompt "write a FastAPI endpoint"        # actually chat
    locally from the token estimate; keyword fallback on any error).
 2. **Route**: filter the model table by context window, allowed families, and
    tool support, then sort by a mode-dependent blend of cost and quality
-   scores, with a bonus for models whose strengths match the task.
+   scores, with a bonus for models whose strengths match the task. Strengths
+   are grounded in Artificial Analysis per-domain benchmarks — e.g. DeepSeek's
+   1M-token windows don't earn it a long-context preference (worst cohort
+   AA-LCR), and its 4% non-hallucination rate disqualifies it from factual
+   Q&A, which routes to MiMo/MiniMax instead.
 3. **Chat** with the top model; on retryable errors (429/5xx/timeouts) retry
    with backoff, on hard errors fall through to the next model in the route.
    Reasoning is enabled for coding/reasoning/long-context tasks and explicitly
@@ -71,26 +76,31 @@ python router.py --prompt "..." [options]
 
 ## Models
 
-Current-generation models only, one budget and/or one flagship route per family
-(catalog-validated 2026-07-01):
+Current-generation models only, one budget and/or one flagship route per
+family. Catalog-validated and benchmark-calibrated 2026-07-01 (AA =
+[Artificial Analysis Intelligence Index](https://artificialanalysis.ai/leaderboards/models) v4.1):
 
-| Family | Budget route | Flagship route |
-|---|---|---|
-| DeepSeek | `deepseek/deepseek-v4-flash` | `deepseek/deepseek-v4-pro` |
-| Qwen | `qwen/qwen3.7-plus` | `qwen/qwen3.7-max` |
-| Kimi (Moonshot) | — | `moonshotai/kimi-k2.7-code` |
-| GLM (Z.ai) | — | `z-ai/glm-5.2` |
-| MiniMax | — | `minimax/minimax-m3` |
-| MiMo (Xiaomi) | `xiaomi/mimo-v2.5` | `xiaomi/mimo-v2.5-pro` |
+| Model | AA index | Routed for | Notes |
+|---|---|---|---|
+| `z-ai/glm-5.2` | 51 (#1 open-weights) | reasoning, coding, long context | #1 cohort coding + agentic |
+| `qwen/qwen3.7-max` | 46 | coding, reasoning, creative | #2 cohort coding |
+| `deepseek/deepseek-v4-pro` | 44 | reasoning, coding | #2 cohort agentic |
+| `minimax/minimax-m3` | 44 | simple, reasoning, long context, creative | #1 cohort AA-LCR + non-hallucination |
+| `moonshotai/kimi-k2.7-code` | 42 | coding, reasoning, long context | coding specialist (uncharted) |
+| `xiaomi/mimo-v2.5-pro` | 42 | coding, long context | weak reasoning benchmarks |
+| `deepseek/deepseek-v4-flash` | 40 | coding, translation | cheapest; heavy hallucinator on facts |
+| `xiaomi/mimo-v2.5` | 40 (est.) | simple, coding, reasoning, long context | budget default |
+| `qwen/qwen3.7-plus` | 39 | simple, translation, creative, long context | budget tier |
 
 The table lives at the top of `router.py` (`MODELS`) and is meant to be
 edited: slugs drift (`--validate-models` checks them against the live
-catalog). Both score axes are grounded in data: `quality_score` is calibrated
-to the [Artificial Analysis Intelligence Index](https://artificialanalysis.ai/leaderboards/models)
-(v4.1, 2026-07-01; `7.6 + 0.1 * (index - 40)`), and with `--live-pricing` the
-cost scores are derived from OpenRouter's real price list
-(`1 + log2(price/cheapest)`, cached to disk daily, stale-tolerant offline).
-Candidates not yet added are tracked in `MODELS_TODO.md`.
+catalog). All three routing axes are grounded in data: `quality_score` is
+calibrated to the AA index (`7.6 + 0.1 * (index - 40)`), `strengths` to AA's
+per-domain charts (Coding/Agentic Index, AA-LCR, GPQA/HLE/CritPt,
+AA-Omniscience, IFBench), and with `--live-pricing` the cost scores are
+derived from OpenRouter's real price list (`1 + log2(price/cheapest)`, cached
+to disk daily, stale-tolerant offline). Candidates not yet added are tracked
+in `MODELS_TODO.md`.
 
 With `--log-file`, every completed request appends a JSONL line with the
 routed model, task, latency, token counts (including hidden reasoning tokens)
