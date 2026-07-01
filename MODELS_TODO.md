@@ -26,5 +26,5 @@ Chinese-origin LLM families available on OpenRouter (catalog snapshot 2026-06-30
 ## Also noted (within existing families, not yet added)
 
 - Qwen coding-specialized: `qwen/qwen3-coder-plus`, `qwen/qwen3-coder-next` — could strengthen the `coding` route.
-- Qwen mid-tier: `qwen/qwen3.6-plus` / `qwen/qwen3.7-plus` — a balanced tier between flash and max.
+- ~~Qwen mid-tier: `qwen/qwen3.6-plus` / `qwen/qwen3.7-plus`~~ — DONE: `qwen3.7-plus` replaced `qwen3.6-flash` as the Qwen budget tier (2026-07-01).
 - GLM cheap/fast: `z-ai/glm-4.7-flash`; GLM vision: `z-ai/glm-5v-turbo`.

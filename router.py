@@ -113,14 +113,14 @@ MODELS: list[ModelProfile] = [
 
     # Qwen
     ModelProfile(
-        name="qwen_flash",
+        name="qwen_plus",
         family="qwen",
-        model="qwen/qwen3.6-flash",
-        cost_score=1.4,
-        quality_score=7.7,
+        model="qwen/qwen3.7-plus",
+        cost_score=1.5,
+        quality_score=8.1,
         strengths={"simple", "translation", "creative", "long_context"},
         max_context_tokens=1_000_000,
-        notes="Fast and low-cost Qwen model.",
+        notes="Current-gen Qwen mid-tier: cheap, 1M context.",
         reasoning=True,
     ),
     ModelProfile(
@@ -130,7 +130,7 @@ MODELS: list[ModelProfile] = [
         cost_score=3.4,
         quality_score=8.8,
         strengths={"coding", "reasoning", "creative"},
-        max_context_tokens=262_000,
+        max_context_tokens=1_000_000,
         notes="Flagship Qwen (3.7) for coding and reasoning.",
         reasoning=True,
     ),
@@ -169,7 +169,7 @@ MODELS: list[ModelProfile] = [
         cost_score=2.1,
         quality_score=8.4,
         strengths={"coding", "reasoning", "long_context", "creative"},
-        max_context_tokens=524_000,
+        max_context_tokens=1_000_000,
         notes="More capable MiniMax route with long-context support.",
         reasoning=True,
     ),
